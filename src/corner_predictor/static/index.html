@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>角球大小盘实时概率</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+  <header>
+    <h1>角球大小盘实时概率预测（MVP）</h1>
+  </header>
+
+  <section id="controls">
+    <label>主队 <input id="home-team" value="Home FC" /></label>
+    <label>客队 <input id="away-team" value="Away United" /></label>
+    <label>阈值 <input id="threshold" type="number" step="0.5" value="9.5" /></label>
+    <label>随机种子（可选） <input id="seed" type="number" /></label>
+    <button id="start-btn">开始模拟比赛</button>
+    <span id="status"></span>
+  </section>
+
+  <section id="match-info">
+    <div class="stat"><span class="label">比分钟</span><span id="minute">--</span></div>
+    <div class="stat"><span class="label">比分</span><span id="score">-- : --</span></div>
+    <div class="stat"><span class="label">角球（主/客）</span><span id="corners">-- / --</span></div>
+    <div class="stat"><span class="label">控球率（主）</span><span id="possession">--%</span></div>
+    <div class="stat"><span class="label">阈值</span><span id="current-threshold">--</span></div>
+    <div class="stat highlight"><span class="label">大于阈值概率</span><span id="prob-over">--%</span></div>
+    <div class="stat"><span class="label">期望总角球数</span><span id="expected-total">--</span></div>
+  </section>
+
+  <section id="charts">
+    <div class="chart-container">
+      <h2>大于阈值概率 随比赛时间变化</h2>
+      <canvas id="prob-chart"></canvas>
+    </div>
+    <div class="chart-container">
+      <h2>全场角球数概率分布（PMF）</h2>
+      <canvas id="pmf-chart"></canvas>
+    </div>
+  </section>
+
+  <section id="match-list">
+    <h2>比赛列表</h2>
+    <table>
+      <thead>
+        <tr><th>对阵</th><th>状态</th><th>最终角球数</th><th></th></tr>
+      </thead>
+      <tbody id="match-list-body"></tbody>
+    </table>
+  </section>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

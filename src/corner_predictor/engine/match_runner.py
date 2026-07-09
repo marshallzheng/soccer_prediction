@@ -15,15 +15,15 @@ from corner_predictor.persistence.repository import MatchRepository
 
 
 class Broadcaster(Protocol):
-    async def publish(self, match_id: str, message: dict) -> None: ...
+    async def publish(self, fixture_id: str, message: dict) -> None: ...
 
 
 class LiveUpdate(BaseModel):
     """Single serialization point for what gets pushed to WebSocket subscribers each tick."""
 
-    match_id: str
-    minute: float
-    period: int
+    fixture_id: str
+    minute: int
+    state_id: int
     home_team: str
     away_team: str
     score_home: int
@@ -45,7 +45,7 @@ class MatchRunner:
 
     def __init__(
         self,
-        match_id: str,
+        fixture_id: str,
         data_source: MatchDataSource,
         repository: MatchRepository,
         source_name: str = "mock",
@@ -54,7 +54,7 @@ class MatchRunner:
         broadcaster: Broadcaster | None = None,
         tick_interval_seconds: float | None = None,
     ) -> None:
-        self.match_id = match_id
+        self.fixture_id = fixture_id
         self.data_source = data_source
         self.repository = repository
         self.source_name = source_name
@@ -69,7 +69,10 @@ class MatchRunner:
         self.rate_estimator = RateEstimator()
         self.prior_rate_per_min = settings.prior_corners_per_90min / 90.0
 
-        self._event_history: list[MatchEvent] = []
+        self._events: list[MatchEvent] = []
+        """Discrete goal/card/substitution events only -- see StatisticEntry for cumulative stats."""
+        self._state_history: list[MatchState] = []
+        """Past ticks' snapshots, used by FeatureEngine to compute rolling-window deltas."""
         self._stopped = False
 
         self.latest_state: MatchState | None = None
@@ -81,14 +84,15 @@ class MatchRunner:
         self._stopped = True
 
     async def run(self) -> None:
-        state = await self.data_source.start_match(self.match_id)
-        self.repository.create_match(self.match_id, state.home_team, state.away_team, source=self.source_name)
+        state = await self.data_source.start_match(self.fixture_id)
+        self.repository.create_match(self.fixture_id, state.home_team, state.away_team, source=self.source_name)
 
         while not self.data_source.is_finished() and not self._stopped:
             state, events = await self.data_source.next_tick()
-            self._event_history.extend(events)
+            self._events.extend(events)
 
-            features = self.feature_engine.compute(state, self._event_history)
+            features = self.feature_engine.compute(state, self._state_history)
+            self._state_history.append(state)
             rate = self.rate_estimator.estimate_remaining_rate(features, self.prior_rate_per_min)
             result = self.model.predict(
                 observed_corners=state.corners_total,
@@ -102,18 +106,18 @@ class MatchRunner:
             self.latest_rate = rate
             self.latest_result = result
 
-            self.repository.save_tick(self.match_id, state, features, result)
+            self.repository.save_tick(self.fixture_id, state, features, result)
             self.repository.save_events(events)
 
             if self.broadcaster is not None:
                 update = self._build_live_update(state, result)
-                await self.broadcaster.publish(self.match_id, update.model_dump())
+                await self.broadcaster.publish(self.fixture_id, update.model_dump())
 
             await asyncio.sleep(self.tick_interval_seconds)
 
         if self.latest_state is not None:
             self.repository.finalize_match(
-                self.match_id,
+                self.fixture_id,
                 final_corners_home=self.latest_state.corners_home,
                 final_corners_away=self.latest_state.corners_away,
             )
@@ -131,9 +135,9 @@ class MatchRunner:
 
     def _build_live_update(self, state: MatchState, result: ProbabilityResult) -> LiveUpdate:
         return LiveUpdate(
-            match_id=state.match_id,
+            fixture_id=state.fixture_id,
             minute=state.minute,
-            period=state.period,
+            state_id=int(state.state_id),
             home_team=state.home_team,
             away_team=state.away_team,
             score_home=state.score_home,
@@ -159,19 +163,19 @@ class MatchRegistry:
         self._tasks: dict[str, asyncio.Task] = {}
 
     def register(self, runner: MatchRunner) -> None:
-        self._runners[runner.match_id] = runner
+        self._runners[runner.fixture_id] = runner
         task = asyncio.create_task(runner.run())
-        task.add_done_callback(lambda _: self._forget(runner.match_id))
-        self._tasks[runner.match_id] = task
+        task.add_done_callback(lambda _: self._forget(runner.fixture_id))
+        self._tasks[runner.fixture_id] = task
 
-    def _forget(self, match_id: str) -> None:
+    def _forget(self, fixture_id: str) -> None:
         """Drop the runner once its tick loop finishes, so long-running servers
-        don't accumulate MatchRunner/event-history state for matches that ended."""
-        self._runners.pop(match_id, None)
-        self._tasks.pop(match_id, None)
+        don't accumulate MatchRunner/state-history state for matches that ended."""
+        self._runners.pop(fixture_id, None)
+        self._tasks.pop(fixture_id, None)
 
-    def get(self, match_id: str) -> MatchRunner | None:
-        return self._runners.get(match_id)
+    def get(self, fixture_id: str) -> MatchRunner | None:
+        return self._runners.get(fixture_id)
 
     def list_ids(self) -> list[str]:
         return list(self._runners.keys())

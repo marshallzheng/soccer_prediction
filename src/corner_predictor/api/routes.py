@@ -21,11 +21,11 @@ class SimulateMatchRequest(BaseModel):
 
 
 class SimulateMatchResponse(BaseModel):
-    match_id: str
+    fixture_id: str
 
 
 class MatchSummary(BaseModel):
-    id: str
+    fixture_id: str
     home_team: str
     away_team: str
     source: str
@@ -36,7 +36,7 @@ class MatchSummary(BaseModel):
 
 
 class MatchDetail(MatchSummary):
-    minute: float | None = None
+    minute: int | None = None
     corners_home: int | None = None
     corners_away: int | None = None
     threshold: float | None = None
@@ -52,7 +52,7 @@ def list_matches(
 ) -> list[MatchSummary]:
     return [
         MatchSummary(
-            id=m.id,
+            fixture_id=m.fixture_id,
             home_team=m.home_team,
             away_team=m.away_team,
             source=m.source,
@@ -71,7 +71,7 @@ async def simulate_match(
     repository: MatchRepository = Depends(get_repository),
     reg: MatchRegistry = Depends(get_registry),
 ) -> SimulateMatchResponse:
-    match_id = str(uuid.uuid4())
+    fixture_id = str(uuid.uuid4())
     simulator = MockMatchSimulator(
         home_team=body.home_team,
         away_team=body.away_team,
@@ -79,7 +79,7 @@ async def simulate_match(
         seed=body.seed,
     )
     runner = MatchRunner(
-        match_id=match_id,
+        fixture_id=fixture_id,
         data_source=simulator,
         repository=repository,
         source_name="mock",
@@ -87,22 +87,22 @@ async def simulate_match(
         broadcaster=manager,
     )
     reg.register(runner)
-    return SimulateMatchResponse(match_id=match_id)
+    return SimulateMatchResponse(fixture_id=fixture_id)
 
 
-@router.get("/matches/{match_id}", response_model=MatchDetail)
+@router.get("/matches/{fixture_id}", response_model=MatchDetail)
 def get_match(
-    match_id: str,
+    fixture_id: str,
     repository: MatchRepository = Depends(get_repository),
     reg: MatchRegistry = Depends(get_registry),
 ) -> MatchDetail:
-    match = repository.get_match(match_id)
+    match = repository.get_match(fixture_id)
     if match is None:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    runner = reg.get(match_id)
+    runner = reg.get(fixture_id)
     detail = MatchDetail(
-        id=match.id,
+        fixture_id=match.fixture_id,
         home_team=match.home_team,
         away_team=match.away_team,
         source=match.source,
@@ -127,14 +127,14 @@ def get_match(
     return detail
 
 
-@router.get("/matches/{match_id}/history")
+@router.get("/matches/{fixture_id}/history")
 def get_match_history(
-    match_id: str,
+    fixture_id: str,
     repository: MatchRepository = Depends(get_repository),
 ) -> list[dict]:
-    if repository.get_match(match_id) is None:
+    if repository.get_match(fixture_id) is None:
         raise HTTPException(status_code=404, detail="Match not found")
-    ticks = repository.get_tick_history(match_id)
+    ticks = repository.get_tick_history(fixture_id)
     return [
         {
             "minute": t.minute,

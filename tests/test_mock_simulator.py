@@ -1,18 +1,26 @@
-import asyncio
-
 import pytest
 
 from corner_predictor.data_sources.mock_simulator import MockMatchSimulator
-from corner_predictor.data_sources.models import EventType
+from corner_predictor.data_sources.models import FixtureStateId
 
 
-async def _run_full_match(seed: int) -> tuple[int, list[float]]:
+async def _run_full_match(seed: int) -> tuple[int, list[int]]:
+    """Returns (final total corners, approximate corner occurrence minutes).
+
+    Corners are modeled as a cumulative statistic (not discrete events), so
+    occurrence minutes are reconstructed by noting the tick minute each time
+    the cumulative total increases -- fine-grained enough for statistical
+    sanity checks even though it loses sub-tick precision.
+    """
     sim = MockMatchSimulator(minutes_per_tick=1.0, seed=seed)
     state = await sim.start_match(f"seed-{seed}")
-    corner_minutes: list[float] = []
+    corner_minutes: list[int] = []
+    prev_total = state.corners_total
     while not sim.is_finished():
-        state, events = await sim.next_tick()
-        corner_minutes.extend(e.minute for e in events if e.event_type == EventType.CORNER)
+        state, _ = await sim.next_tick()
+        delta = state.corners_total - prev_total
+        corner_minutes.extend([state.minute] * delta)
+        prev_total = state.corners_total
     return state.corners_total, corner_minutes
 
 
@@ -30,7 +38,7 @@ async def test_average_total_corners_within_expected_range() -> None:
 
 @pytest.mark.asyncio
 async def test_average_inter_corner_gap_within_expected_range() -> None:
-    all_gaps: list[float] = []
+    all_gaps: list[int] = []
     for seed in range(60):
         _, minutes = await _run_full_match(seed)
         minutes = sorted(minutes)
@@ -58,20 +66,15 @@ async def test_next_tick_raises_before_start_match() -> None:
 
 
 @pytest.mark.asyncio
-async def test_half_transition_events_emitted() -> None:
+async def test_state_id_transitions_through_both_halves_to_full_time() -> None:
     sim = MockMatchSimulator(minutes_per_tick=1.0, seed=1)
     await sim.start_match("m1")
-    seen_half_end = False
-    seen_half_start = False
+    seen_states: set[FixtureStateId] = set()
+    final_state = None
     while not sim.is_finished():
-        _, events = await sim.next_tick()
-        for e in events:
-            if e.event_type == EventType.HALF_END:
-                seen_half_end = True
-            if e.event_type == EventType.HALF_START:
-                seen_half_start = True
-    assert seen_half_end and seen_half_start
-
-
-if __name__ == "__main__":
-    asyncio.run(test_average_total_corners_within_expected_range())
+        final_state, _ = await sim.next_tick()
+        seen_states.add(final_state.state_id)
+    assert FixtureStateId.INPLAY_1ST_HALF in seen_states
+    assert FixtureStateId.INPLAY_2ND_HALF in seen_states
+    assert final_state is not None
+    assert final_state.state_id == FixtureStateId.FT

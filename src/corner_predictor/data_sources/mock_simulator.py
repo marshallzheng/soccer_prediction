@@ -1,6 +1,17 @@
+import zlib
+
 import numpy as np
 
-from corner_predictor.data_sources.models import EventType, MatchEvent, MatchState
+from corner_predictor.data_sources.models import (
+    FINISHED_STATE_IDS,
+    EventTypeId,
+    FixtureStateId,
+    Location,
+    MatchEvent,
+    MatchState,
+    StatisticEntry,
+    StatisticTypeId,
+)
 
 # Calibrated so a full 90-minute match averages ~10 total corners, ~24 shots,
 # ~2.6 goals, and ~100 dangerous attacks (split across both teams), roughly in
@@ -20,13 +31,22 @@ _BURST_SIZE = 0.8
 _TRAILING_URGENCY_BUMP = 0.35
 
 
+def _stable_participant_id(team_name: str) -> int:
+    """Deterministic id from a team name, so re-simulating the same team yields the same id
+    (mirrors Sportmonks' persistent per-team participant_id)."""
+    return zlib.crc32(team_name.encode()) % 1_000_000
+
+
 class MockMatchSimulator:
     """Generates a plausible live event stream without needing a real data-provider API.
 
-    Attack intensity per team follows a mean-reverting random walk (with
-    occasional momentum "bursts") that drives the Poisson rate of corners,
-    shots, and dangerous attacks each tick -- so downstream features actually
-    correlate with the corner rate, the way they would against a real feed.
+    Corners, shots, shots-on-target, and dangerous attacks are modeled as
+    cumulative `statistics` values (mirroring Sportmonks' shape) rather than
+    discrete events -- only goals are discrete `MatchEvent`s. Attack intensity
+    per team follows a mean-reverting random walk (with occasional momentum
+    "bursts") that drives the Poisson rate of every stat each tick, so
+    downstream features actually correlate with the corner rate, the way they
+    would against a real feed.
     """
 
     def __init__(
@@ -41,63 +61,89 @@ class MockMatchSimulator:
         self.minutes_per_tick = minutes_per_tick
         self._rng = np.random.default_rng(seed)
 
-        self._match_id: str | None = None
+        self._fixture_id: str | None = None
         self._state: MatchState | None = None
+        self._minute_float = 0.0
         self._intensity_home = 1.0
         self._intensity_away = 1.0
-        self._finished = False
+        self._stats: dict[tuple[StatisticTypeId, Location], float] = {}
+        self._next_event_id = 1
 
-    async def start_match(self, match_id: str) -> MatchState:
-        self._match_id = match_id
+    async def start_match(self, fixture_id: str) -> MatchState:
+        self._fixture_id = fixture_id
+        self._minute_float = 0.0
+        self._stats = {
+            (type_id, location): 0.0
+            for type_id in StatisticTypeId
+            for location in ("home", "away")
+        }
+        self._stats[(StatisticTypeId.BALL_POSSESSION, "home")] = 50.0
+        self._stats[(StatisticTypeId.BALL_POSSESSION, "away")] = 50.0
         self._state = MatchState(
-            match_id=match_id,
-            minute=0.0,
-            period=1,
+            fixture_id=fixture_id,
+            state_id=FixtureStateId.NS,
+            minute=0,
+            home_participant_id=_stable_participant_id(self.home_team),
+            away_participant_id=_stable_participant_id(self.away_team),
             home_team=self.home_team,
             away_team=self.away_team,
+            statistics=self._statistics_snapshot(),
         )
-        self._finished = False
         return self._state
 
     def is_finished(self) -> bool:
-        return self._finished
+        return self._state is not None and self._state.state_id in FINISHED_STATE_IDS
 
     async def next_tick(self) -> tuple[MatchState, list[MatchEvent]]:
-        if self._state is None or self._match_id is None:
+        if self._state is None or self._fixture_id is None:
             raise RuntimeError("start_match() must be called before next_tick()")
-        if self._finished:
+        if self.is_finished():
             return self._state, []
 
         state = self._state
         dt = self.minutes_per_tick
         events: list[MatchEvent] = []
 
-        prev_minute = state.minute
-        new_minute = min(prev_minute + dt, 90.0)
-        state.minute = new_minute
+        if state.state_id == FixtureStateId.NS:
+            state.state_id = FixtureStateId.INPLAY_1ST_HALF
 
-        if prev_minute < 45.0 <= new_minute and state.period == 1:
-            events.append(self._event(EventType.HALF_END, prev_minute))
-            state.period = 2
-            events.append(self._event(EventType.HALF_START, new_minute))
+        prev_minute = self._minute_float
+        self._minute_float = min(prev_minute + dt, 90.0)
+        state.minute = int(round(self._minute_float))
+
+        if prev_minute < 45.0 <= self._minute_float and state.state_id == FixtureStateId.INPLAY_1ST_HALF:
+            state.state_id = FixtureStateId.INPLAY_2ND_HALF
 
         self._step_intensity(dt)
 
-        events.extend(self._sample_events(EventType.CORNER, dt, "corners"))
-        events.extend(self._sample_events(EventType.SHOT, dt, "shots"))
-        events.extend(self._sample_events(EventType.SHOT_ON_TARGET, dt, "shots_on_target"))
-        events.extend(self._sample_events(EventType.DANGEROUS_ATTACK, dt, "dangerous_attacks"))
+        self._accumulate(StatisticTypeId.CORNERS, _BASE_CORNER_RATE_PER_TEAM_PER_MIN, dt)
+        self._accumulate(StatisticTypeId.SHOTS_TOTAL, _BASE_SHOT_RATE_PER_TEAM_PER_MIN, dt)
+        self._accumulate(
+            StatisticTypeId.SHOTS_ON_TARGET, _BASE_SHOT_RATE_PER_TEAM_PER_MIN * _SHOT_ON_TARGET_FRACTION, dt
+        )
+        self._accumulate(StatisticTypeId.DANGEROUS_ATTACKS, _BASE_DANGEROUS_ATTACK_RATE_PER_TEAM_PER_MIN, dt)
         events.extend(self._sample_goal_events(dt))
 
         total_intensity = self._intensity_home + self._intensity_away
-        state.possession_home_pct = round(100.0 * self._intensity_home / total_intensity, 1)
+        possession_home = round(100.0 * self._intensity_home / total_intensity, 1)
+        self._stats[(StatisticTypeId.BALL_POSSESSION, "home")] = possession_home
+        self._stats[(StatisticTypeId.BALL_POSSESSION, "away")] = round(100.0 - possession_home, 1)
 
-        if new_minute >= 90.0:
-            state.is_live = False
-            self._finished = True
-            events.append(self._event(EventType.MATCH_END, new_minute))
+        state.statistics = self._statistics_snapshot()
+
+        if self._minute_float >= 90.0:
+            state.state_id = FixtureStateId.FT
 
         return state, events
+
+    def _statistics_snapshot(self) -> list[StatisticEntry]:
+        home_id = _stable_participant_id(self.home_team)
+        away_id = _stable_participant_id(self.away_team)
+        participant_id = {"home": home_id, "away": away_id}
+        return [
+            StatisticEntry(type_id=type_id, participant_id=participant_id[location], location=location, value=value)
+            for (type_id, location), value in self._stats.items()
+        ]
 
     def _step_intensity(self, dt: float) -> None:
         for attr in ("_intensity_home", "_intensity_away"):
@@ -110,41 +156,24 @@ class MockMatchSimulator:
             value = float(np.clip(value, _INTENSITY_MIN, _INTENSITY_MAX))
             setattr(self, attr, value)
 
-    def _sample_events(self, event_type: EventType, dt: float, field_prefix: str) -> list[MatchEvent]:
-        assert self._state is not None
-        state = self._state
-        events: list[MatchEvent] = []
-        base_rate = {
-            EventType.CORNER: _BASE_CORNER_RATE_PER_TEAM_PER_MIN,
-            EventType.SHOT: _BASE_SHOT_RATE_PER_TEAM_PER_MIN,
-            EventType.SHOT_ON_TARGET: _BASE_SHOT_RATE_PER_TEAM_PER_MIN * _SHOT_ON_TARGET_FRACTION,
-            EventType.DANGEROUS_ATTACK: _BASE_DANGEROUS_ATTACK_RATE_PER_TEAM_PER_MIN,
-        }[event_type]
-
-        for team, intensity in (("home", self._intensity_home), ("away", self._intensity_away)):
-            lam = base_rate * intensity * dt
+    def _accumulate(self, type_id: StatisticTypeId, base_rate_per_team_per_min: float, dt: float) -> None:
+        for location, intensity in (("home", self._intensity_home), ("away", self._intensity_away)):
+            lam = base_rate_per_team_per_min * intensity * dt
             count = int(self._rng.poisson(lam))
-            if count <= 0:
-                continue
-            field = f"{field_prefix}_{team}"
-            setattr(state, field, getattr(state, field) + count)
-            events.extend(
-                MatchEvent(match_id=state.match_id, minute=state.minute, event_type=event_type, team=team)
-                for _ in range(count)
-            )
-        return events
+            if count > 0:
+                self._stats[(type_id, location)] += count
 
     def _sample_goal_events(self, dt: float) -> list[MatchEvent]:
-        assert self._state is not None
+        assert self._state is not None and self._fixture_id is not None
         state = self._state
         events: list[MatchEvent] = []
-        for team, intensity in (("home", self._intensity_home), ("away", self._intensity_away)):
+        for location, intensity in (("home", self._intensity_home), ("away", self._intensity_away)):
             lam = _BASE_GOAL_RATE_PER_TEAM_PER_MIN * intensity * dt
             count = int(self._rng.poisson(lam))
             if count <= 0:
                 continue
             for _ in range(count):
-                if team == "home":
+                if location == "home":
                     state.score_home += 1
                     self._intensity_away = float(
                         np.clip(self._intensity_away + _TRAILING_URGENCY_BUMP, _INTENSITY_MIN, _INTENSITY_MAX)
@@ -154,11 +183,17 @@ class MockMatchSimulator:
                     self._intensity_home = float(
                         np.clip(self._intensity_home + _TRAILING_URGENCY_BUMP, _INTENSITY_MIN, _INTENSITY_MAX)
                     )
+                participant_id = state.home_participant_id if location == "home" else state.away_participant_id
                 events.append(
-                    MatchEvent(match_id=state.match_id, minute=state.minute, event_type=EventType.GOAL, team=team)
+                    MatchEvent(
+                        id=self._next_event_id,
+                        fixture_id=self._fixture_id,
+                        type_id=EventTypeId.GOAL,
+                        participant_id=participant_id,
+                        location=location,
+                        minute=state.minute,
+                        result=f"{state.score_home}-{state.score_away}",
+                    )
                 )
+                self._next_event_id += 1
         return events
-
-    def _event(self, event_type: EventType, minute: float) -> MatchEvent:
-        assert self._match_id is not None
-        return MatchEvent(match_id=self._match_id, minute=minute, event_type=event_type)

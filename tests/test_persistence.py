@@ -1,6 +1,6 @@
 import pytest
 
-from corner_predictor.data_sources.models import EventType, MatchEvent, MatchState
+from corner_predictor.data_sources.models import EventTypeId, MatchEvent, MatchState, StatisticEntry, StatisticTypeId
 from corner_predictor.features.models import FeatureSnapshot
 from corner_predictor.model.schemas import ProbabilityResult
 from corner_predictor.persistence.repository import MatchRepository
@@ -8,12 +8,16 @@ from corner_predictor.persistence.repository import MatchRepository
 
 def _state() -> MatchState:
     return MatchState(
-        match_id="m1",
-        minute=42.0,
+        fixture_id="m1",
+        minute=42,
+        home_participant_id=1,
+        away_participant_id=2,
         home_team="Home FC",
         away_team="Away United",
-        corners_home=3,
-        corners_away=2,
+        statistics=[
+            StatisticEntry(type_id=StatisticTypeId.CORNERS, participant_id=1, location="home", value=3),
+            StatisticEntry(type_id=StatisticTypeId.CORNERS, participant_id=2, location="away", value=2),
+        ],
     )
 
 
@@ -51,7 +55,7 @@ def test_create_match_and_list_matches() -> None:
     repo.create_match("m1", "Home FC", "Away United", source="mock")
     matches = repo.list_matches()
     assert len(matches) == 1
-    assert matches[0].id == "m1"
+    assert matches[0].fixture_id == "m1"
     assert matches[0].status == "live"
 
 
@@ -63,18 +67,21 @@ def test_save_tick_and_get_history() -> None:
     history = repo.get_tick_history("m1")
     assert len(history) == 1
     tick = history[0]
-    assert tick.minute == 42.0
+    assert tick.minute == 42
     assert tick.corners_home == 3
     assert tick.prob_over == pytest.approx(0.4)
     assert tick.pmf == [[5, 0.1], [6, 0.2]]
+    assert tick.statistics == [s.model_dump() for s in _state().statistics]
 
 
 def test_save_events() -> None:
     repo = MatchRepository()
     repo.create_match("m1", "Home FC", "Away United", source="mock")
     events = [
-        MatchEvent(match_id="m1", minute=10.0, event_type=EventType.CORNER, team="home"),
-        MatchEvent(match_id="m1", minute=15.0, event_type=EventType.SHOT, team="away"),
+        MatchEvent(id=1, fixture_id="m1", type_id=EventTypeId.GOAL, participant_id=1, location="home", minute=10),
+        MatchEvent(
+            id=2, fixture_id="m1", type_id=EventTypeId.SUBSTITUTION, participant_id=2, location="away", minute=15
+        ),
     ]
     repo.save_events(events)
     repo.save_events([])  # no-op, should not raise

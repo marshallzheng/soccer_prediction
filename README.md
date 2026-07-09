@@ -8,6 +8,12 @@
 - 用时变泊松/负二项分布对"剩余角球数"建模，解析计算 P(总角球数 > 阈值) 及完整概率分布（PMF）。
 - 每场比赛的逐拍数据会持久化到 SQLite（`data/corner_predictor.db`），为未来训练机器学习模型积累数据。
 
+## 数据格式
+
+内部数据模型（`src/corner_predictor/data_sources/models.py`）直接采用 Sportmonks API 的原生数据形状（`type_id`/`participant_id`/`state_id`、`statistics` 累计值数组等），不做供应商中立层的翻译。这意味着角球/射门/危险进攻等指标是**累计统计值**而非带时间戳的独立事件（只有进球/牌/换人是离散事件），"最近N分钟活跃度"这类滚动窗口特征是通过历史快照做差分算出来的（见 `features/engine.py`）。
+
+**注意**：`models.py` 里的 `EventTypeId`/`StatisticTypeId`/`FixtureStateId` 数值来自官方文档搜索结果，尚未对照真实API响应验证过。拿到 Sportmonks API key 后，第一步应该是用一场真实比赛的响应核对这些常量是否准确，如有出入直接改这一个文件即可。
+
 ## 运行
 
 ```bash

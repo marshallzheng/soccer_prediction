@@ -16,14 +16,14 @@ class MatchRepository:
     touching business logic in MatchRunner or the API routes.
     """
 
-    def create_match(self, match_id: str, home_team: str, away_team: str, source: str) -> None:
+    def create_match(self, fixture_id: str, home_team: str, away_team: str, source: str) -> None:
         with get_session() as session:
-            session.add(Match(id=match_id, home_team=home_team, away_team=away_team, source=source))
+            session.add(Match(fixture_id=fixture_id, home_team=home_team, away_team=away_team, source=source))
             session.commit()
 
     def save_tick(
         self,
-        match_id: str,
+        fixture_id: str,
         state: MatchState,
         features: FeatureSnapshot,
         result: ProbabilityResult,
@@ -31,8 +31,9 @@ class MatchRepository:
         with get_session() as session:
             session.add(
                 MatchTick(
-                    match_id=match_id,
+                    fixture_id=fixture_id,
                     minute=state.minute,
+                    statistics=[s.model_dump() for s in state.statistics],
                     score_home=state.score_home,
                     score_away=state.score_away,
                     corners_home=state.corners_home,
@@ -56,36 +57,29 @@ class MatchRepository:
 
     def save_event(self, event: MatchEvent) -> None:
         with get_session() as session:
-            session.add(
-                MatchEventRecord(
-                    match_id=event.match_id,
-                    minute=event.minute,
-                    event_type=event.event_type.value,
-                    team=event.team,
-                    payload=event.payload,
-                )
-            )
+            session.add(self._to_event_record(event))
             session.commit()
 
     def save_events(self, events: list[MatchEvent]) -> None:
         if not events:
             return
         with get_session() as session:
-            session.add_all(
-                MatchEventRecord(
-                    match_id=e.match_id,
-                    minute=e.minute,
-                    event_type=e.event_type.value,
-                    team=e.team,
-                    payload=e.payload,
-                )
-                for e in events
-            )
+            session.add_all(self._to_event_record(e) for e in events)
             session.commit()
 
-    def finalize_match(self, match_id: str, final_corners_home: int, final_corners_away: int) -> None:
+    @staticmethod
+    def _to_event_record(event: MatchEvent) -> MatchEventRecord:
+        return MatchEventRecord(
+            fixture_id=event.fixture_id,
+            minute=event.minute,
+            type_id=int(event.type_id),
+            location=event.location,
+            payload={"extra_minute": event.extra_minute, "result": event.result},
+        )
+
+    def finalize_match(self, fixture_id: str, final_corners_home: int, final_corners_away: int) -> None:
         with get_session() as session:
-            match = session.get(Match, match_id)
+            match = session.get(Match, fixture_id)
             if match is None:
                 return
             match.status = "finished"
@@ -98,11 +92,11 @@ class MatchRepository:
         with get_session() as session:
             return list(session.scalars(select(Match).order_by(Match.started_at.desc())))
 
-    def get_match(self, match_id: str) -> Match | None:
+    def get_match(self, fixture_id: str) -> Match | None:
         with get_session() as session:
-            return session.get(Match, match_id)
+            return session.get(Match, fixture_id)
 
-    def get_tick_history(self, match_id: str) -> list[MatchTick]:
+    def get_tick_history(self, fixture_id: str) -> list[MatchTick]:
         with get_session() as session:
-            stmt = select(MatchTick).where(MatchTick.match_id == match_id).order_by(MatchTick.minute)
+            stmt = select(MatchTick).where(MatchTick.fixture_id == fixture_id).order_by(MatchTick.minute)
             return list(session.scalars(stmt))

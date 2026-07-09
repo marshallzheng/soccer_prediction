@@ -7,6 +7,7 @@
     startBtn: document.getElementById("start-btn"),
     status: document.getElementById("status"),
     minute: document.getElementById("minute"),
+    matchState: document.getElementById("match-state"),
     score: document.getElementById("score"),
     corners: document.getElementById("corners"),
     possession: document.getElementById("possession"),
@@ -17,6 +18,23 @@
   };
 
   let socket = null;
+
+  // Mirrors Sportmonks' fixture `state_id` taxonomy (see data_sources/models.py FixtureStateId).
+  const STATE_LABELS = {
+    1: "未开始",
+    2: "上半场",
+    3: "中场",
+    4: "中场",
+    5: "已结束",
+    6: "加时上半场",
+    7: "已结束（加时）",
+    8: "已结束（点球）",
+    9: "点球大战",
+    10: "已延期",
+    11: "已中断",
+    12: "已取消",
+    22: "下半场",
+  };
 
   const probChart = new Chart(document.getElementById("prob-chart"), {
     type: "line",
@@ -53,6 +71,7 @@
 
   function applyUpdate(update) {
     els.minute.textContent = update.minute.toFixed(0);
+    els.matchState.textContent = STATE_LABELS[update.state_id] || `state_id=${update.state_id}`;
     els.score.textContent = `${update.score_home} : ${update.score_away}`;
     els.corners.textContent = `${update.corners_home} / ${update.corners_away}`;
     els.possession.textContent = `${update.possession_home_pct.toFixed(0)}%`;
@@ -73,15 +92,15 @@
     }
   }
 
-  function connect(matchId) {
+  function connect(fixtureId) {
     if (socket) {
       socket.close();
     }
     resetCharts();
-    els.status.textContent = `已连接：${matchId}`;
+    els.status.textContent = `已连接：${fixtureId}`;
 
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(`${protocol}://${location.host}/ws/matches/${matchId}`);
+    socket = new WebSocket(`${protocol}://${location.host}/ws/matches/${fixtureId}`);
     socket.onmessage = (event) => applyUpdate(JSON.parse(event.data));
     socket.onclose = () => {
       if (els.status.textContent.startsWith("已连接")) {
@@ -106,14 +125,14 @@
       }),
     });
     const data = await response.json();
-    connect(data.match_id);
+    connect(data.fixture_id);
     refreshMatchList();
   }
 
-  async function loadFinishedMatchHistory(matchId) {
+  async function loadFinishedMatchHistory(fixtureId) {
     resetCharts();
-    els.status.textContent = `查看历史：${matchId}`;
-    const response = await fetch(`/api/matches/${matchId}/history`);
+    els.status.textContent = `查看历史：${fixtureId}`;
+    const response = await fetch(`/api/matches/${fixtureId}/history`);
     const ticks = await response.json();
     probChart.data.datasets[0].data = ticks.map((t) => ({ x: t.minute, y: t.prob_over }));
     probChart.update();
@@ -131,7 +150,7 @@
         <td>${m.home_team} vs ${m.away_team}</td>
         <td>${m.is_running ? "进行中" : m.status}</td>
         <td>${corners}</td>
-        <td><button class="link-btn" data-id="${m.id}" data-live="${m.is_running}">查看</button></td>
+        <td><button class="link-btn" data-id="${m.fixture_id}" data-live="${m.is_running}">查看</button></td>
       `;
       els.matchListBody.appendChild(row);
     }

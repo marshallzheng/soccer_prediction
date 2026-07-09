@@ -9,36 +9,36 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._connections: dict[str, list[WebSocket]] = {}
 
-    async def connect(self, match_id: str, websocket: WebSocket) -> None:
+    async def connect(self, fixture_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
-        self._connections.setdefault(match_id, []).append(websocket)
+        self._connections.setdefault(fixture_id, []).append(websocket)
 
-    def disconnect(self, match_id: str, websocket: WebSocket) -> None:
-        conns = self._connections.get(match_id)
+    def disconnect(self, fixture_id: str, websocket: WebSocket) -> None:
+        conns = self._connections.get(fixture_id)
         if conns and websocket in conns:
             conns.remove(websocket)
             if not conns:
-                del self._connections[match_id]
+                del self._connections[fixture_id]
 
-    async def publish(self, match_id: str, message: dict) -> None:
+    async def publish(self, fixture_id: str, message: dict) -> None:
         stale: list[WebSocket] = []
-        for ws in self._connections.get(match_id, []):
+        for ws in self._connections.get(fixture_id, []):
             try:
                 await ws.send_json(message)
             except Exception:
                 stale.append(ws)
         for ws in stale:
-            self.disconnect(match_id, ws)
+            self.disconnect(fixture_id, ws)
 
 
 manager = ConnectionManager()
 
 
-@router.websocket("/ws/matches/{match_id}")
-async def match_updates(websocket: WebSocket, match_id: str) -> None:
-    await manager.connect(match_id, websocket)
+@router.websocket("/ws/matches/{fixture_id}")
+async def match_updates(websocket: WebSocket, fixture_id: str) -> None:
+    await manager.connect(fixture_id, websocket)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        manager.disconnect(match_id, websocket)
+        manager.disconnect(fixture_id, websocket)

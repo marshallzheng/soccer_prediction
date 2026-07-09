@@ -15,7 +15,7 @@ def _utcnow() -> dt.datetime:
 class Match(Base):
     __tablename__ = "matches"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    fixture_id: Mapped[str] = mapped_column(String, primary_key=True)
     home_team: Mapped[str]
     away_team: Mapped[str]
     source: Mapped[str]
@@ -37,14 +37,18 @@ class MatchTick(Base):
     """
 
     __tablename__ = "match_ticks"
-    __table_args__ = (Index("ix_match_ticks_match_id_minute", "match_id", "minute"),)
+    __table_args__ = (Index("ix_match_ticks_fixture_id_minute", "fixture_id", "minute"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    match_id: Mapped[str] = mapped_column(ForeignKey("matches.id"))
-    minute: Mapped[float]
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("matches.fixture_id"))
+    minute: Mapped[int]
     timestamp: Mapped[dt.datetime] = mapped_column(default=_utcnow)
 
-    # Raw state snapshot
+    # Raw statistics payload, mirroring Sportmonks' `statistics` include verbatim
+    # (list of {type_id, participant_id, location, value}), for full-fidelity ML training later.
+    statistics: Mapped[list] = mapped_column(JSON)
+
+    # Flattened convenience columns (derived from `statistics` at write time) for querying/indexing.
     score_home: Mapped[int]
     score_away: Mapped[int]
     corners_home: Mapped[int]
@@ -69,14 +73,15 @@ class MatchTick(Base):
 
 
 class MatchEventRecord(Base):
-    """Raw event log, independent of tick snapshots, for future feature re-engineering."""
+    """Raw event log (goals/cards/substitutions), independent of tick snapshots."""
 
     __tablename__ = "match_events"
-    __table_args__ = (Index("ix_match_events_match_id_minute", "match_id", "minute"),)
+    __table_args__ = (Index("ix_match_events_fixture_id_minute", "fixture_id", "minute"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    match_id: Mapped[str] = mapped_column(ForeignKey("matches.id"))
-    minute: Mapped[float]
-    event_type: Mapped[str]
-    team: Mapped[str | None]
+    fixture_id: Mapped[str] = mapped_column(ForeignKey("matches.fixture_id"))
+    minute: Mapped[int]
+    type_id: Mapped[int]
+    location: Mapped[str | None]
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    """Extra fields not worth their own column, e.g. extra_minute, result."""
